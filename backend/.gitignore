@@ -1,0 +1,11 @@
+# Environment variables
+.env
+.env.*
+*.env
+
+# Node modules & Python cache
+node_modules/
+__pycache__/
+*.pyc
+fastf1_cache/
+f1_cache/

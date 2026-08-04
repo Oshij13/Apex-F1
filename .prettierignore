@@ -1,0 +1,12 @@
+node_modules
+.venv
+dist
+build
+.next
+.gemini
+*.log
+backend/venv
+fastf1_cache
+.wrangler
+f1-race-replay-main
+
