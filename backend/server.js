@@ -756,8 +756,34 @@ app.get("/api/live/session", async (req, res) => {
   }
 });
 
+// ─── TELEMETRY PROXY ──────────────────────────────────────────────────────────
+// Proxies requests to the Python FastAPI telemetry service.
+// Set PYTHON_TELEMETRY_URL on Render to your deployed Python service URL.
+const PYTHON_TELEMETRY_URL = process.env.PYTHON_TELEMETRY_URL || null;
+
+app.get("/api/telemetry/:year/:round", async (req, res) => {
+  if (!PYTHON_TELEMETRY_URL) {
+    return res.status(503).json({
+      error: "Telemetry service not configured",
+      message: "Set PYTHON_TELEMETRY_URL on your Render Node backend to your Python telemetry service URL.",
+    });
+  }
+  const { year, round } = req.params;
+  try {
+    const response = await axios.get(
+      `${PYTHON_TELEMETRY_URL}/api/telemetry/${year}/${round}`,
+      { timeout: 120000 } // 2 min timeout for heavy telemetry processing
+    );
+    res.json(response.data);
+  } catch (e) {
+    console.error(`[TELEMETRY] Proxy failed for ${year}/${round}:`, e.message);
+    res.status(502).json({ error: "Telemetry service unavailable", detail: e.message });
+  }
+});
+
 // ─── HEALTH ───────────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.send("🚀 Apex F1 Backend Online"));
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {

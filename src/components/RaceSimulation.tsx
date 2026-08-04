@@ -103,7 +103,7 @@ export const RaceSimulation: React.FC<RaceSimulationProps> = ({
     const fetchData = async () => {
       try {
         setLoading(true);
-        const telemetryBase = import.meta.env.VITE_TELEMETRY_URL || "http://localhost:8000/api";
+        const telemetryBase = import.meta.env.VITE_API_URL || "http://localhost:3000/api";
         const res = await fetch(
           `${telemetryBase}/telemetry/${year}/${round}`,
         );
