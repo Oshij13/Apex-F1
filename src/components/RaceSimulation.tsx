@@ -693,7 +693,25 @@ export const RaceSimulation: React.FC<RaceSimulationProps> = ({
     );
 
   if (error)
-    return <div className="p-12 text-center text-red-400">Error: {error}</div>;
+    return (
+      <div className="flex h-[400px] flex-col items-center justify-center gap-4 rounded-2xl border border-border bg-surface-1 p-8 text-center">
+        <div className="rounded-full bg-amber-500/10 p-4 text-amber-500">
+          <Activity size={40} />
+        </div>
+        <h4 className="text-xl font-bold uppercase tracking-wider text-white font-display">
+          Local Telemetry Backend Offline
+        </h4>
+        <p className="max-w-md text-xs text-muted-foreground leading-relaxed">
+          FastF1 race simulations require the Python telemetry service running locally on port 8000.
+        </p>
+        <div className="mt-2 flex flex-col items-center gap-2">
+          <span className="text-[10px] uppercase tracking-widest text-primary/70">To launch locally, run:</span>
+          <code className="rounded-lg bg-black/60 px-4 py-2 text-xs font-mono text-primary border border-white/10 shadow-inner">
+            python backend/telemetry_service.py
+          </code>
+        </div>
+      </div>
+    );
 
   return (
     <div ref={containerRef} className="w-full">
