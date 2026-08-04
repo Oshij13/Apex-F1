@@ -103,8 +103,9 @@ export const RaceSimulation: React.FC<RaceSimulationProps> = ({
     const fetchData = async () => {
       try {
         setLoading(true);
+        const telemetryBase = import.meta.env.VITE_TELEMETRY_URL || "http://localhost:8000/api";
         const res = await fetch(
-          `http://localhost:8000/api/telemetry/${year}/${round}`,
+          `${telemetryBase}/telemetry/${year}/${round}`,
         );
         if (!res.ok) throw new Error("Failed to fetch telemetry");
         const json = await res.json();
