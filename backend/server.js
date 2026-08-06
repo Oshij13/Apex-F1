@@ -774,7 +774,29 @@ app.get("/api/telemetry/:year/:round", async (req, res) => {
       `${PYTHON_TELEMETRY_URL}/api/telemetry/${year}/${round}`,
       { timeout: 120000 } // 2 min timeout for heavy telemetry processing
     );
-    res.json(response.data);
+    const contentType = response.headers["content-type"] || "";
+    const telemetry = response.data;
+    const hasValidTelemetry =
+      contentType.includes("application/json") &&
+      telemetry &&
+      typeof telemetry === "object" &&
+      !Array.isArray(telemetry) &&
+      telemetry.drivers &&
+      typeof telemetry.drivers === "object" &&
+      Object.keys(telemetry.drivers).length > 0;
+
+    if (!hasValidTelemetry) {
+      console.error(
+        `[TELEMETRY] Invalid response for ${year}/${round}: content-type=${contentType}`
+      );
+      return res.status(502).json({
+        error: "Invalid telemetry service response",
+        message:
+          "The configured telemetry URL did not return FastAPI telemetry JSON. Verify the Cloud Run service deployment and URL.",
+      });
+    }
+
+    res.json(telemetry);
   } catch (e) {
     console.error(`[TELEMETRY] Proxy failed for ${year}/${round}:`, e.message);
     res.status(502).json({ error: "Telemetry service unavailable", detail: e.message });
