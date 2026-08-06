@@ -66,6 +66,22 @@ interface RaceSimulationProps {
   round: number;
 }
 
+const isSimulationData = (value: unknown): value is SimulationData => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+
+  const simulation = value as Partial<SimulationData>;
+  return (
+    typeof simulation.event === "string" &&
+    Array.isArray(simulation.track_path) &&
+    !!simulation.drivers &&
+    typeof simulation.drivers === "object" &&
+    !Array.isArray(simulation.drivers) &&
+    Object.keys(simulation.drivers).length > 0 &&
+    typeof simulation.fps === "number" &&
+    typeof simulation.duration === "number"
+  );
+};
+
 export const RaceSimulation: React.FC<RaceSimulationProps> = ({
   year,
   round,
@@ -103,12 +119,30 @@ export const RaceSimulation: React.FC<RaceSimulationProps> = ({
     const fetchData = async () => {
       try {
         setLoading(true);
+        setError(null);
         const telemetryBase = import.meta.env.VITE_API_URL || "http://localhost:3000/api";
         const res = await fetch(
           `${telemetryBase}/telemetry/${year}/${round}`,
         );
-        if (!res.ok) throw new Error("Failed to fetch telemetry");
-        const json = await res.json();
+        const contentType = res.headers.get("content-type") || "";
+        if (!contentType.includes("application/json")) {
+          throw new Error(
+            "Telemetry service returned an invalid response. Check the deployed telemetry service URL.",
+          );
+        }
+
+        const json: unknown = await res.json();
+        if (!res.ok) {
+          const apiError = json as { error?: string; message?: string };
+          throw new Error(
+            apiError.message || apiError.error || "Failed to fetch telemetry",
+          );
+        }
+        if (!isSimulationData(json)) {
+          throw new Error(
+            "Telemetry service returned incomplete data. Verify that FastAPI is running on Cloud Run.",
+          );
+        }
         console.log("Telemetry Data Loaded:", {
           event: json.event,
           hasDRSZones: !!json.drs_zones,
@@ -117,7 +151,8 @@ export const RaceSimulation: React.FC<RaceSimulationProps> = ({
         setData(json);
         setCurrentTime(0);
       } catch (err: any) {
-        setError(err.message);
+        setData(null);
+        setError(err instanceof Error ? err.message : "Failed to load telemetry");
       } finally {
         setLoading(false);
       }
@@ -699,17 +734,21 @@ export const RaceSimulation: React.FC<RaceSimulationProps> = ({
           <Activity size={40} />
         </div>
         <h4 className="text-xl font-bold uppercase tracking-wider text-white font-display">
-          Local Telemetry Backend Offline
+          Telemetry Unavailable
         </h4>
         <p className="max-w-md text-xs text-muted-foreground leading-relaxed">
-          FastF1 race simulations require the Python telemetry service running locally on port 8000.
+          {error}
         </p>
-        <div className="mt-2 flex flex-col items-center gap-2">
-          <span className="text-[10px] uppercase tracking-widest text-primary/70">To launch locally, run:</span>
-          <code className="rounded-lg bg-black/60 px-4 py-2 text-xs font-mono text-primary border border-white/10 shadow-inner">
-            python backend/telemetry_service.py
-          </code>
-        </div>
+        {import.meta.env.DEV && (
+          <div className="mt-2 flex flex-col items-center gap-2">
+            <span className="text-[10px] uppercase tracking-widest text-primary/70">
+              Local development command
+            </span>
+            <code className="rounded-lg bg-black/60 px-4 py-2 text-xs font-mono text-primary border border-white/10 shadow-inner">
+              python backend/telemetry_service.py
+            </code>
+          </div>
+        )}
       </div>
     );
 
