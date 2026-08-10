@@ -90,7 +90,6 @@ export const RaceSimulation: React.FC<RaceSimulationProps> = ({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [data, setData] = useState<SimulationData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [loadingTimer, setLoadingTimer] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [isLiveMode, setIsLiveMode] = useState(false);
 
@@ -154,12 +153,27 @@ export const RaceSimulation: React.FC<RaceSimulationProps> = ({
               message?: string;
               detail?: string;
             };
-            throw new Error(
+            const errorMessage =
               apiError.message ||
-                apiError.detail ||
-                apiError.error ||
-                "Failed to fetch telemetry",
-            );
+              apiError.detail ||
+              apiError.error ||
+              "Failed to fetch telemetry";
+
+            // Older telemetry deployments can time out after doing useful
+            // first-time cache work. Keep the loading card visible and retry.
+            if (
+              res.status === 502 &&
+              /timeout|timed out|120000ms|service unavailable/i.test(
+                errorMessage,
+              )
+            ) {
+              await new Promise<void>((resolve) =>
+                window.setTimeout(resolve, 4000),
+              );
+              continue;
+            }
+
+            throw new Error(errorMessage);
           }
           if (!isSimulationData(json)) {
             throw new Error(
@@ -189,19 +203,6 @@ export const RaceSimulation: React.FC<RaceSimulationProps> = ({
     fetchData();
     return () => controller.abort();
   }, [year, round]);
-
-  // 1b. Loading Timer Logic
-  useEffect(() => {
-    let interval: any;
-    if (loading) {
-      interval = setInterval(() => {
-        setLoadingTimer((prev) => prev + 1);
-      }, 1000);
-    } else {
-      setLoadingTimer(0);
-    }
-    return () => clearInterval(interval);
-  }, [loading]);
 
   // 3. Status & Pit Notification Logic
   useEffect(() => {
@@ -736,23 +737,26 @@ export const RaceSimulation: React.FC<RaceSimulationProps> = ({
 
   if (loading)
     return (
-      <div className="flex h-[600px] flex-col items-center justify-center gap-4 rounded-xl border border-border bg-surface-1">
-        <div className="relative flex items-center justify-center">
-          <Loader2 className="h-12 w-12 animate-spin text-primary opacity-20" />
-          <div className="absolute font-mono text-[10px] font-bold text-primary">
-            {loadingTimer}s
-          </div>
+      <div className="flex h-[600px] flex-col items-center justify-center rounded-xl border border-border bg-surface-1 px-8 text-center">
+        <div className="relative mb-7 flex h-20 w-20 items-center justify-center rounded-full border border-primary/20 bg-primary/5">
+          <div className="absolute inset-2 rounded-full border border-primary/10" />
+          <Loader2 className="h-9 w-9 animate-spin text-primary" />
         </div>
-        <div className="text-center">
-          <p className="text-sm font-bold uppercase tracking-[0.2em] text-white">
-            Initializing Race Simulations
+        <div className="max-w-md">
+          <p className="text-lg font-display font-bold uppercase tracking-[0.22em] text-white">
+            Preparing Race Telemetry
           </p>
-          <p className="text-[10px] text-muted-foreground mt-2 uppercase tracking-widest animate-pulse">
-            Fetching Telemetry & Satellite Data...
+          <p className="mt-3 text-xs uppercase tracking-[0.16em] text-muted-foreground animate-pulse">
+            Downloading and processing session data
           </p>
-          <p className="text-[9px] text-primary/40 mt-4 uppercase tracking-[0.1em]">
-            This process typically takes 60 seconds to reload the race
+          <p className="mt-6 text-sm leading-relaxed text-white/55">
+            The first load for a race can take a few minutes while its telemetry
+            is prepared. This page will update automatically when it is ready.
           </p>
+          <div className="mt-5 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-4 py-2 text-[10px] uppercase tracking-[0.16em] text-white/40">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
+            Please keep this page open
+          </div>
         </div>
       </div>
     );
