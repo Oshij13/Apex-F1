@@ -18,3 +18,5 @@ services:
         sync: false
       - key: RAPIDAPI_HOST
         sync: false
+      - key: PYTHON_TELEMETRY_URL
+        sync: false

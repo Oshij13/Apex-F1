@@ -1,10 +1,18 @@
 import os
 import math
+import json
+import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import fastf1
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, status
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from datetime import timedelta
 import uvicorn
 
@@ -16,12 +24,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-# Setup FastF1 Cache
-CACHE_DIR = "fastf1_cache"
-if not os.path.exists(CACHE_DIR):
-    os.makedirs(CACHE_DIR)
-fastf1.Cache.enable_cache(CACHE_DIR)
+# Both caches must live below a stable, absolute directory on the phone. Set
+# APEX_CACHE_ROOT to persistent storage in production.
+APP_DIR = Path(__file__).resolve().parent
+CACHE_ROOT = Path(os.getenv("APEX_CACHE_ROOT", APP_DIR / "fastf1_cache")).expanduser().resolve()
+FASTF1_CACHE_DIR = CACHE_ROOT / "fastf1"
+CACHE_VERSION = os.getenv("TELEMETRY_CACHE_VERSION", "v1")
+PROCESSED_CACHE_DIR = CACHE_ROOT / "processed" / CACHE_VERSION
+FASTF1_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+PROCESSED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+fastf1.Cache.enable_cache(str(FASTF1_CACHE_DIR))
+
+logger = logging.getLogger("apex.telemetry")
+GENERATION_WORKERS = max(1, int(os.getenv("TELEMETRY_GENERATION_WORKERS", "1")))
+generation_pool = ThreadPoolExecutor(max_workers=GENERATION_WORKERS, thread_name_prefix="race-generation")
+generation_states = {}
+generation_states_lock = threading.Lock()
 
 FPS = 10  # Reduced FPS for lighter payload over web
 DT = 1 / FPS
@@ -64,30 +84,46 @@ def _resample_driver(session, driver_code, global_t_min, global_t_max):
     except:
         return None
 
-import os
-import json
+def _cache_path(year: int, race_round: int) -> Path:
+    return PROCESSED_CACHE_DIR / f"{year}-{race_round:02d}.json"
 
-CACHE_DIR = "fastf1_cache/processed"
-os.makedirs(CACHE_DIR, exist_ok=True)
 
-@app.get("/api/telemetry/{year}/{round}")
-async def get_telemetry(year: int, round: int):
-    cache_path = os.path.join(CACHE_DIR, f"{year}_{round}.json")
-    
-    # Try loading from cache first
-    if (os.path.exists(cache_path)):
-        try:
-            with open(cache_path, 'r') as f:
-                c_data = json.load(f)
-                # If cached data is missing or has empty DRS zones, we re-process to get them
-                if c_data.get("drs_zones") and len(c_data["drs_zones"]) > 0:
-                    print(f"Loading {year} Round {round} from CACHE")
-                    return c_data
-                else:
-                    print(f"Cache for {year} Round {round} is MISSING DRS. Re-loading from API...")
-        except:
-            pass
+def _read_processed_cache(year: int, race_round: int):
+    cache_path = _cache_path(year, race_round)
+    if not cache_path.is_file():
+        return None
+    try:
+        with cache_path.open("r", encoding="utf-8") as cache_file:
+            data = json.load(cache_file)
+        if (
+            data.get("cache_version") == CACHE_VERSION
+            and isinstance(data.get("drivers"), dict)
+            and data["drivers"]
+            and isinstance(data.get("track_path"), list)
+        ):
+            return data
+        logger.warning("Ignoring invalid processed cache file: %s", cache_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Unable to read processed cache %s: %s", cache_path, exc)
+    return None
 
+
+def _write_processed_cache(year: int, race_round: int, data: dict) -> None:
+    cache_path = _cache_path(year, race_round)
+    temp_path = cache_path.with_suffix(f".json.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with temp_path.open("w", encoding="utf-8") as cache_file:
+            json.dump(data, cache_file, separators=(",", ":"), allow_nan=False)
+            cache_file.flush()
+            os.fsync(cache_file.fileno())
+        os.replace(temp_path, cache_path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+
+def _generate_telemetry(year: int, round: int):
+    cache_path = _cache_path(year, round)
     try:
         print(f"Loading {year} Round {round} Full Race from API...")
         session = fastf1.get_session(year, round, 'R')
@@ -384,6 +420,7 @@ async def get_telemetry(year: int, round: int):
         except: pass
 
         result = {
+            "cache_version": CACHE_VERSION,
             "event": str(session.event['EventName']),
             "track_path": track_path,
             "drs_zones": drs_zones,
@@ -396,15 +433,127 @@ async def get_telemetry(year: int, round: int):
             "duration": float(global_t_max - global_t_min)
         }
 
-        # Save to cache
-        with open(cache_path, 'w') as f:
-            json.dump(result, f)
+        # Write atomically so a polling request can never observe partial JSON.
+        _write_processed_cache(year, round, result)
             
         return result
 
     except Exception as e:
         print(f"Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise RuntimeError(str(e)) from e
+
+
+def _classify_generation_error(exc: Exception):
+    message = str(exc)
+    lowered = message.lower()
+    unavailable_markers = (
+        "no data for this session",
+        "failed to load any data",
+        "no telemetry data found",
+        "does not exist",
+        "cannot find",
+    )
+    if any(marker in lowered for marker in unavailable_markers):
+        return "fastf1_data_unavailable", 404
+    return "processing_failed", 422
+
+
+def _run_generation(year: int, race_round: int) -> None:
+    key = (year, race_round)
+    try:
+        _generate_telemetry(year, race_round)
+        with generation_states_lock:
+            generation_states[key] = {
+                "status": "ready",
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            }
+    except Exception as exc:
+        error_code, http_status = _classify_generation_error(exc)
+        logger.exception("Telemetry generation failed for %s round %s", year, race_round)
+        with generation_states_lock:
+            generation_states[key] = {
+                "status": "failed",
+                "error": error_code,
+                "message": str(exc),
+                "http_status": http_status,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+
+def _telemetry_response(year: int, race_round: int):
+    if year < 2018 or race_round < 1 or race_round > 30:
+        raise HTTPException(status_code=400, detail="Invalid year or race round")
+
+    cached = _read_processed_cache(year, race_round)
+    if cached is not None:
+        return cached
+
+    key = (year, race_round)
+    with generation_states_lock:
+        current = generation_states.get(key)
+        if current and current["status"] == "failed":
+            payload = {"status": "failed", "year": year, "round": race_round, **current}
+            return JSONResponse(status_code=current["http_status"], content=payload)
+        if not current or current["status"] != "processing":
+            generation_states[key] = {
+                "status": "processing",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            }
+            generation_pool.submit(_run_generation, year, race_round)
+
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        headers={"Retry-After": "4", "Cache-Control": "no-store"},
+        content={
+            "status": "processing",
+            "year": year,
+            "round": race_round,
+            "retry_after": 4,
+        },
+    )
+
+
+@app.get("/api/telemetry/{year}/{round}")
+def get_telemetry(year: int, round: int):
+    return _telemetry_response(year, round)
+
+
+@app.get("/api/telemetry/status/{year}/{round}")
+def get_telemetry_status(year: int, round: int):
+    cached = _read_processed_cache(year, round)
+    if cached is not None:
+        return {"status": "ready", "year": year, "round": round}
+    with generation_states_lock:
+        state = generation_states.get((year, round))
+        if state is None:
+            return {"status": "not_started", "year": year, "round": round}
+        return {"year": year, "round": round, **state}
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "cache_version": CACHE_VERSION,
+        "cache_root": str(CACHE_ROOT),
+    }
+
+
+@app.on_event("startup")
+def prewarm_configured_races() -> None:
+    """Queue comma-separated YEAR-ROUND values without delaying startup."""
+    configured = os.getenv("PREWARM_RACES", "").strip()
+    if not configured:
+        return
+    for value in configured.split(","):
+        try:
+            year_text, round_text = value.strip().split("-", 1)
+            year, race_round = int(year_text), int(round_text)
+            if _read_processed_cache(year, race_round) is None:
+                _telemetry_response(year, race_round)
+                logger.info("Queued pre-warm for %s round %s", year, race_round)
+        except (ValueError, HTTPException) as exc:
+            logger.error("Invalid PREWARM_RACES entry %r: %s", value, exc)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -116,48 +116,78 @@ export const RaceSimulation: React.FC<RaceSimulationProps> = ({
 
   // 1. Fetch Data
   useEffect(() => {
+    const controller = new AbortController();
+
     const fetchData = async () => {
       try {
         setLoading(true);
         setError(null);
-        const telemetryBase = import.meta.env.VITE_API_URL || "http://localhost:3000/api";
-        const res = await fetch(
-          `${telemetryBase}/telemetry/${year}/${round}`,
-        );
-        const contentType = res.headers.get("content-type") || "";
-        if (!contentType.includes("application/json")) {
-          throw new Error(
-            "Telemetry service returned an invalid response. Check the deployed telemetry service URL.",
-          );
-        }
+        const telemetryBase =
+          import.meta.env.VITE_API_URL || "http://localhost:3000/api";
+        const telemetryUrl = `${telemetryBase}/telemetry/${year}/${round}`;
 
-        const json: unknown = await res.json();
-        if (!res.ok) {
-          const apiError = json as { error?: string; message?: string };
-          throw new Error(
-            apiError.message || apiError.error || "Failed to fetch telemetry",
-          );
+        while (!controller.signal.aborted) {
+          const res = await fetch(telemetryUrl, {
+            signal: controller.signal,
+            cache: "no-store",
+          });
+          const contentType = res.headers.get("content-type") || "";
+          if (!contentType.includes("application/json")) {
+            throw new Error(
+              "The telemetry service returned an invalid response.",
+            );
+          }
+
+          const json: unknown = await res.json();
+          if (res.status === 202) {
+            const processing = json as { retry_after?: number };
+            const retryAfter = Math.max(2, processing.retry_after || 4);
+            await new Promise<void>((resolve) =>
+              window.setTimeout(resolve, retryAfter * 1000),
+            );
+            continue;
+          }
+
+          if (!res.ok) {
+            const apiError = json as {
+              error?: string;
+              message?: string;
+              detail?: string;
+            };
+            throw new Error(
+              apiError.message ||
+                apiError.detail ||
+                apiError.error ||
+                "Failed to fetch telemetry",
+            );
+          }
+          if (!isSimulationData(json)) {
+            throw new Error(
+              "The telemetry service returned incomplete telemetry data.",
+            );
+          }
+
+          console.log("Telemetry Data Loaded:", {
+            event: json.event,
+            hasDRSZones: !!json.drs_zones,
+            drsCount: json.drs_zones?.length || 0,
+          });
+          setData(json);
+          setCurrentTime(0);
+          return;
         }
-        if (!isSimulationData(json)) {
-          throw new Error(
-            "Telemetry service returned incomplete data. Verify that FastAPI is running on Cloud Run.",
-          );
-        }
-        console.log("Telemetry Data Loaded:", {
-          event: json.event,
-          hasDRSZones: !!json.drs_zones,
-          drsCount: json.drs_zones?.length || 0
-        });
-        setData(json);
-        setCurrentTime(0);
-      } catch (err: any) {
+      } catch (err: unknown) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
         setData(null);
-        setError(err instanceof Error ? err.message : "Failed to load telemetry");
+        setError(
+          err instanceof Error ? err.message : "Failed to load telemetry",
+        );
       } finally {
-        setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       }
     };
     fetchData();
+    return () => controller.abort();
   }, [year, round]);
 
   // 1b. Loading Timer Logic

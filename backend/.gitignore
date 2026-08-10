@@ -9,3 +9,4 @@ __pycache__/
 *.pyc
 fastf1_cache/
 f1_cache/
+cache/
