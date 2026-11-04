@@ -5,6 +5,7 @@ const cors = require("cors");
 const path = require("path");
 require("dotenv").config({ path: path.join(__dirname, ".env") });
 const NodeCache = require("node-cache");
+const { SocksProxyAgent } = require("socks-proxy-agent");
 
 const app = express();
 app.use(cors());
@@ -760,24 +761,54 @@ app.get("/api/live/session", async (req, res) => {
 // Proxies requests to the Python FastAPI telemetry service.
 // Set PYTHON_TELEMETRY_URL on Render to your deployed Python service URL.
 const PYTHON_TELEMETRY_URL = process.env.PYTHON_TELEMETRY_URL || null;
+const telemetrySocksUrl = process.env.TELEMETRY_SOCKS_URL;
+const telemetryAgent = telemetrySocksUrl
+  ? new SocksProxyAgent(telemetrySocksUrl)
+  : undefined;
 
 app.get("/api/telemetry/:year/:round", async (req, res) => {
   if (!PYTHON_TELEMETRY_URL) {
     return res.status(503).json({
       error: "Telemetry service not configured",
-      message: "Set PYTHON_TELEMETRY_URL on your Render Node backend to your Python telemetry service URL.",
+      message:
+        "Set PYTHON_TELEMETRY_URL on your Render Node backend to your Python telemetry service URL.",
     });
   }
   const { year, round } = req.params;
   try {
+    console.info("[TELEMETRY] Request", {
+      race: `${year}/${round}`,
+      upstream: new URL(PYTHON_TELEMETRY_URL).host,
+      socksEnabled: Boolean(telemetryAgent),
+    });
     const response = await axios.get(
       `${PYTHON_TELEMETRY_URL}/api/telemetry/${year}/${round}`,
-      { timeout: 120000 } // 2 min timeout for heavy telemetry processing
+      {
+        timeout: 120000,
+        validateStatus: (status) => status >= 200 && status < 500,
+        ...(telemetryAgent ? { httpAgent: telemetryAgent, proxy: false } : {}),
+      },
     );
     const contentType = response.headers["content-type"] || "";
     const telemetry = response.data;
+    if (!contentType.includes("application/json")) {
+      return res.status(502).json({
+        error: "invalid_telemetry_response",
+        message: "The phone telemetry service returned a non-JSON response.",
+      });
+    }
+
+    if (response.status === 202) {
+      res.set("Retry-After", response.headers["retry-after"] || "4");
+      res.set("Cache-Control", "no-store");
+      return res.status(202).json(telemetry);
+    }
+
+    if (response.status >= 400) {
+      return res.status(response.status).json(telemetry);
+    }
+
     const hasValidTelemetry =
-      contentType.includes("application/json") &&
       telemetry &&
       typeof telemetry === "object" &&
       !Array.isArray(telemetry) &&
@@ -787,25 +818,32 @@ app.get("/api/telemetry/:year/:round", async (req, res) => {
 
     if (!hasValidTelemetry) {
       console.error(
-        `[TELEMETRY] Invalid response for ${year}/${round}: content-type=${contentType}`
+        `[TELEMETRY] Invalid response for ${year}/${round}: content-type=${contentType}`,
       );
       return res.status(502).json({
-        error: "Invalid telemetry service response",
+        error: "invalid_telemetry_response",
         message:
-          "The configured telemetry URL did not return FastAPI telemetry JSON. Verify the Cloud Run service deployment and URL.",
+          "The phone telemetry service returned incomplete telemetry JSON.",
       });
     }
 
     res.json(telemetry);
   } catch (e) {
     console.error(`[TELEMETRY] Proxy failed for ${year}/${round}:`, e.message);
-    res.status(502).json({ error: "Telemetry service unavailable", detail: e.message });
+    const timedOut = e.code === "ECONNABORTED" || e.code === "ETIMEDOUT";
+    res.status(502).json({
+      error: timedOut
+        ? "telemetry_service_timeout"
+        : "telemetry_service_offline",
+      message: timedOut
+        ? "The phone telemetry service did not respond in time."
+        : "The phone telemetry service is currently offline.",
+    });
   }
 });
 
 // ─── HEALTH ───────────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.send("🚀 Apex F1 Backend Online"));
-
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {

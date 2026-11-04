@@ -90,7 +90,6 @@ export const RaceSimulation: React.FC<RaceSimulationProps> = ({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [data, setData] = useState<SimulationData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [loadingTimer, setLoadingTimer] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [isLiveMode, setIsLiveMode] = useState(false);
 
@@ -116,62 +115,94 @@ export const RaceSimulation: React.FC<RaceSimulationProps> = ({
 
   // 1. Fetch Data
   useEffect(() => {
+    const controller = new AbortController();
+
     const fetchData = async () => {
       try {
         setLoading(true);
         setError(null);
-        const telemetryBase = import.meta.env.VITE_API_URL || "http://localhost:3000/api";
-        const res = await fetch(
-          `${telemetryBase}/telemetry/${year}/${round}`,
-        );
-        const contentType = res.headers.get("content-type") || "";
-        if (!contentType.includes("application/json")) {
-          throw new Error(
-            "Telemetry service returned an invalid response. Check the deployed telemetry service URL.",
-          );
-        }
+        const telemetryBase =
+          import.meta.env.VITE_API_URL || "http://localhost:3000/api";
+        const telemetryUrl = `${telemetryBase}/telemetry/${year}/${round}`;
 
-        const json: unknown = await res.json();
-        if (!res.ok) {
-          const apiError = json as { error?: string; message?: string };
-          throw new Error(
-            apiError.message || apiError.error || "Failed to fetch telemetry",
-          );
+        while (!controller.signal.aborted) {
+          const res = await fetch(telemetryUrl, {
+            signal: controller.signal,
+            cache: "no-store",
+          });
+          const contentType = res.headers.get("content-type") || "";
+          if (!contentType.includes("application/json")) {
+            throw new Error(
+              "The telemetry service returned an invalid response.",
+            );
+          }
+
+          const json: unknown = await res.json();
+          if (res.status === 202) {
+            const processing = json as { retry_after?: number };
+            const retryAfter = Math.max(2, processing.retry_after || 4);
+            await new Promise<void>((resolve) =>
+              window.setTimeout(resolve, retryAfter * 1000),
+            );
+            continue;
+          }
+
+          if (!res.ok) {
+            const apiError = json as {
+              error?: string;
+              message?: string;
+              detail?: string;
+            };
+            const errorMessage =
+              apiError.message ||
+              apiError.detail ||
+              apiError.error ||
+              "Failed to fetch telemetry";
+
+            // Older telemetry deployments can time out after doing useful
+            // first-time cache work. Keep the loading card visible and retry.
+            if (
+              res.status === 502 &&
+              /timeout|timed out|120000ms|service unavailable/i.test(
+                errorMessage,
+              )
+            ) {
+              await new Promise<void>((resolve) =>
+                window.setTimeout(resolve, 4000),
+              );
+              continue;
+            }
+
+            throw new Error(errorMessage);
+          }
+          if (!isSimulationData(json)) {
+            throw new Error(
+              "The telemetry service returned incomplete telemetry data.",
+            );
+          }
+
+          console.log("Telemetry Data Loaded:", {
+            event: json.event,
+            hasDRSZones: !!json.drs_zones,
+            drsCount: json.drs_zones?.length || 0,
+          });
+          setData(json);
+          setCurrentTime(0);
+          return;
         }
-        if (!isSimulationData(json)) {
-          throw new Error(
-            "Telemetry service returned incomplete data. Verify that FastAPI is running on Cloud Run.",
-          );
-        }
-        console.log("Telemetry Data Loaded:", {
-          event: json.event,
-          hasDRSZones: !!json.drs_zones,
-          drsCount: json.drs_zones?.length || 0
-        });
-        setData(json);
-        setCurrentTime(0);
-      } catch (err: any) {
+      } catch (err: unknown) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
         setData(null);
-        setError(err instanceof Error ? err.message : "Failed to load telemetry");
+        setError(
+          err instanceof Error ? err.message : "Failed to load telemetry",
+        );
       } finally {
-        setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       }
     };
     fetchData();
+    return () => controller.abort();
   }, [year, round]);
-
-  // 1b. Loading Timer Logic
-  useEffect(() => {
-    let interval: any;
-    if (loading) {
-      interval = setInterval(() => {
-        setLoadingTimer((prev) => prev + 1);
-      }, 1000);
-    } else {
-      setLoadingTimer(0);
-    }
-    return () => clearInterval(interval);
-  }, [loading]);
 
   // 3. Status & Pit Notification Logic
   useEffect(() => {
@@ -706,23 +737,26 @@ export const RaceSimulation: React.FC<RaceSimulationProps> = ({
 
   if (loading)
     return (
-      <div className="flex h-[600px] flex-col items-center justify-center gap-4 rounded-xl border border-border bg-surface-1">
-        <div className="relative flex items-center justify-center">
-          <Loader2 className="h-12 w-12 animate-spin text-primary opacity-20" />
-          <div className="absolute font-mono text-[10px] font-bold text-primary">
-            {loadingTimer}s
-          </div>
+      <div className="flex h-[600px] flex-col items-center justify-center rounded-xl border border-border bg-surface-1 px-8 text-center">
+        <div className="relative mb-7 flex h-20 w-20 items-center justify-center rounded-full border border-primary/20 bg-primary/5">
+          <div className="absolute inset-2 rounded-full border border-primary/10" />
+          <Loader2 className="h-9 w-9 animate-spin text-primary" />
         </div>
-        <div className="text-center">
-          <p className="text-sm font-bold uppercase tracking-[0.2em] text-white">
-            Initializing Race Simulations
+        <div className="max-w-md">
+          <p className="text-lg font-display font-bold uppercase tracking-[0.22em] text-white">
+            Preparing Race Telemetry
           </p>
-          <p className="text-[10px] text-muted-foreground mt-2 uppercase tracking-widest animate-pulse">
-            Fetching Telemetry & Satellite Data...
+          <p className="mt-3 text-xs uppercase tracking-[0.16em] text-muted-foreground animate-pulse">
+            Downloading and processing session data
           </p>
-          <p className="text-[9px] text-primary/40 mt-4 uppercase tracking-[0.1em]">
-            This process typically takes 60 seconds to reload the race
+          <p className="mt-6 text-sm leading-relaxed text-white/55">
+            The first load for a race can take a few minutes while its telemetry
+            is prepared. This page will update automatically when it is ready.
           </p>
+          <div className="mt-5 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-4 py-2 text-[10px] uppercase tracking-[0.16em] text-white/40">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
+            Please keep this page open
+          </div>
         </div>
       </div>
     );

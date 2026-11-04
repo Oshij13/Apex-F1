@@ -8,9 +8,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY telemetry_service.py .
 
-RUN mkdir -p /app/fastf1_cache
+RUN mkdir -p /app/cache
 
-ENV FASTF1_CACHE=/app/fastf1_cache
+ENV APEX_CACHE_ROOT=/app/cache \
+    TELEMETRY_CACHE_VERSION=v1 \
+    TELEMETRY_GENERATION_WORKERS=1
 
 CMD exec uvicorn telemetry_service:app \
     --host 0.0.0.0 \
