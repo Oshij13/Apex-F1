@@ -5,6 +5,7 @@ const cors = require("cors");
 const path = require("path");
 require("dotenv").config({ path: path.join(__dirname, ".env") });
 const NodeCache = require("node-cache");
+const { SocksProxyAgent } = require("socks-proxy-agent");
 
 const app = express();
 app.use(cors());
@@ -760,6 +761,10 @@ app.get("/api/live/session", async (req, res) => {
 // Proxies requests to the Python FastAPI telemetry service.
 // Set PYTHON_TELEMETRY_URL on Render to your deployed Python service URL.
 const PYTHON_TELEMETRY_URL = process.env.PYTHON_TELEMETRY_URL || null;
+const telemetrySocksUrl = process.env.TELEMETRY_SOCKS_URL;
+const telemetryAgent = telemetrySocksUrl
+  ? new SocksProxyAgent(telemetrySocksUrl)
+  : undefined;
 
 app.get("/api/telemetry/:year/:round", async (req, res) => {
   if (!PYTHON_TELEMETRY_URL) {
@@ -774,8 +779,9 @@ app.get("/api/telemetry/:year/:round", async (req, res) => {
     const response = await axios.get(
       `${PYTHON_TELEMETRY_URL}/api/telemetry/${year}/${round}`,
       {
-        timeout: 10000,
+        timeout: 120000,
         validateStatus: (status) => status >= 200 && status < 500,
+        ...(telemetryAgent ? { httpAgent: telemetryAgent, proxy: false } : {}),
       },
     );
     const contentType = response.headers["content-type"] || "";
