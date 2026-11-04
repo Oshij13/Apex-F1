@@ -776,6 +776,11 @@ app.get("/api/telemetry/:year/:round", async (req, res) => {
   }
   const { year, round } = req.params;
   try {
+    console.info("[TELEMETRY] Request", {
+      race: `${year}/${round}`,
+      upstream: new URL(PYTHON_TELEMETRY_URL).host,
+      socksEnabled: Boolean(telemetryAgent),
+    });
     const response = await axios.get(
       `${PYTHON_TELEMETRY_URL}/api/telemetry/${year}/${round}`,
       {
